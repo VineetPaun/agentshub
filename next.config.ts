@@ -1,7 +1,34 @@
-import type { NextConfig } from "next";
+/**
+ * next.config.ts
+ *
+ * Next.js 16 configuration for AgentsHub.
+ *
+ * Key settings:
+ *  - serverActions.bodySizeLimit: "2mb"  — prompts can be long
+ *  - images.remotePatterns              — allow GitHub avatar images
+ */
+
+import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
-  /* config options here */
-};
+  experimental: {
+    // Increase the server action body limit for large prompts
+    serverActions: {
+      bodySizeLimit: "2mb",
+    },
+  },
 
-export default nextConfig;
+  // Allow Next.js Image component to load GitHub avatar URLs
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "avatars.githubusercontent.com",
+        port: "",
+        pathname: "/**",
+      },
+    ],
+  },
+}
+
+export default nextConfig

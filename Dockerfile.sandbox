@@ -1,0 +1,84 @@
+# Dockerfile.sandbox
+#
+# E2B sandbox image pre-baked with all three AI coding CLI agents.
+#
+# Build & push to E2B (run from project root):
+#   npm install -g @e2b/cli
+#   npx e2b auth login
+#   npx e2b template build --dockerfile ./Dockerfile.sandbox --name agent-sandbox
+#
+# After building, E2B prints a template ID (e.g. e2b-template-abc123).
+# Add it to .env.local as:  E2B_TEMPLATE_ID=e2b-template-abc123
+#
+# Rebuild whenever a new CLI version ships.
+
+FROM ubuntu:24.04
+
+# Disable interactive apt prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# System packages
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    python3 \
+    python3-pip \
+    build-essential \
+    unzip \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Node.js 20 LTS (required by all three CLI agents)
+# ---------------------------------------------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Codex CLI — OpenAI's agentic coding CLI
+# https://github.com/openai/codex
+# ---------------------------------------------------------------------------
+RUN npm install -g @openai/codex
+
+# ---------------------------------------------------------------------------
+# Gemini CLI — Google's official Gemini agent
+# https://github.com/google-gemini/gemini-cli
+# ---------------------------------------------------------------------------
+RUN npm install -g @google/gemini-cli
+
+# ---------------------------------------------------------------------------
+# OpenCode — SST's open-source agentic coding tool
+# The Linux x64 release is distributed as a .tar.gz containing a single binary.
+# The GitHub API for sst/opencode redirects to the anomalyco mirror for downloads.
+#
+# Asset name format: opencode-linux-x64.tar.gz
+# Download base:     https://github.com/anomalyco/opencode/releases/download/<tag>/
+# ---------------------------------------------------------------------------
+RUN OPENCODE_VERSION=$(curl -fsSL https://api.github.com/repos/sst/opencode/releases/latest \
+        | grep '"tag_name"' \
+        | cut -d'"' -f4) \
+    && echo "Installing OpenCode ${OPENCODE_VERSION}" \
+    && curl -fsSL \
+        "https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
+        -o /tmp/opencode.tar.gz \
+    && tar -xzf /tmp/opencode.tar.gz -C /tmp \
+    && mv /tmp/opencode /usr/local/bin/opencode \
+    && chmod +x /usr/local/bin/opencode \
+    && rm /tmp/opencode.tar.gz
+
+# ---------------------------------------------------------------------------
+# Python tooling (useful for Python repos)
+# ---------------------------------------------------------------------------
+RUN pip3 install --break-system-packages black pytest
+
+# ---------------------------------------------------------------------------
+# Git global defaults
+# ---------------------------------------------------------------------------
+RUN git config --global init.defaultBranch main \
+    && git config --global advice.detachedHead false
+
+WORKDIR /home/user

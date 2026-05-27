@@ -1,26 +1,185 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* Force dark variant via .dark class (set on <html> in layout.tsx) */
+@custom-variant dark (&:is(.dark *));
+
+/* -------------------------------------------------------------------------
+   Design tokens — AgentsHub dark terminal aesthetic
+   Primary accent : #00ff87 (electric green)
+   Background     : #0d0d0d (near-black)
+   Card surface   : #111111
+   Border         : #1e1e1e
+   Muted text     : #6b7280
+   ------------------------------------------------------------------------- */
 
 @theme inline {
+  /* Map shadcn CSS vars to Tailwind color utilities */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+
+  /* Typography */
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* -------------------------------------------------------------------------
+   Dark theme overrides (always active — layout forces .dark on <html>)
+   ------------------------------------------------------------------------- */
+:root,
+.dark {
+  --background: #0d0d0d;
+  --foreground: #f0f0f0;
+  --card: #111111;
+  --card-foreground: #f0f0f0;
+  --popover: #161616;
+  --popover-foreground: #f0f0f0;
+  --primary: #00ff87;
+  --primary-foreground: #0d0d0d;
+  --secondary: #1e1e1e;
+  --secondary-foreground: #a0a0a0;
+  --muted: #1a1a1a;
+  --muted-foreground: #6b7280;
+  --accent: #00ff87;
+  --accent-foreground: #0d0d0d;
+  --destructive: #ef4444;
+  --border: #1e1e1e;
+  --input: #1a1a1a;
+  --ring: #00ff8780;
+  --radius: 0.5rem;
+
+  /* Charts */
+  --chart-1: #00ff87;
+  --chart-2: #00c4ff;
+  --chart-3: #a855f7;
+  --chart-4: #f59e0b;
+  --chart-5: #ef4444;
+}
+
+/* -------------------------------------------------------------------------
+   Base resets
+   ------------------------------------------------------------------------- */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-inter), system-ui, sans-serif;
+  }
+
+  /* Terminal / code text defaults */
+  code,
+  pre,
+  .font-mono {
+    font-family: var(--font-jetbrains-mono), "Fira Code", monospace;
+  }
+
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Custom scrollbar — thin, dark */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #111;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2e2e2e;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3e3e3e;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* -------------------------------------------------------------------------
+   Utility classes
+   ------------------------------------------------------------------------- */
+@layer utilities {
+  /* Electric green glow — used on primary accent elements */
+  .glow-green {
+    box-shadow: 0 0 12px #00ff8740, 0 0 30px #00ff8720;
+  }
+
+  /* Subtle card hover lift */
+  .card-hover {
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+  .card-hover:hover {
+    transform: translateY(-2px);
+    border-color: #00ff8750;
+    box-shadow: 0 4px 20px #00ff8715;
+  }
+
+  /* Terminal scanline background texture */
+  .terminal-bg {
+    background-color: #0a0a0a;
+    background-image: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      #ffffff04 2px,
+      #ffffff04 4px
+    );
+  }
+
+  /* Blinking cursor animation */
+  .cursor-blink {
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+  }
+
+  /* Fade-in animation */
+  .animate-fade-in {
+    animation: fadeIn 0.4s ease forwards;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Slide-up animation */
+  .animate-slide-up {
+    animation: slideUp 0.35s ease forwards;
+  }
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
 }
