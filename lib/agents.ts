@@ -39,23 +39,30 @@ export function buildCLICommand(opts: CLICommandOptions): string {
 
   // Escape single quotes so the prompt can be safely wrapped in single quotes
   const escapedPrompt = prompt.replace(/'/g, "'\\''")
-  // Escape the repoPath in case it contains spaces (unlikely in /repo but safe)
+  // Escape the repoPath in case it contains spaces.
   const safePath = repoPath.replace(/'/g, "'\\''")
 
   switch (agent) {
     case "opencode":
-      // OpenCode: --print flag for non-interactive one-shot execution
-      // OPENAI_API_KEY is read by OpenCode automatically
-      return `cd '${safePath}' && OPENAI_API_KEY='${apiKey}' opencode run --print '${escapedPrompt}'`
+      // OpenCode: `run` subcommand for non-interactive one-shot execution.
+      // All tool permissions (file writes, etc.) are auto-approved in run mode.
+      // OPENAI_API_KEY is read by OpenCode automatically.
+      return `cd '${safePath}' && OPENAI_API_KEY='${apiKey}' opencode run '${escapedPrompt}'`
 
     case "gemini":
-      // Gemini CLI: --non-interactive + -p for prompt
+      // Gemini CLI: -p for prompt (implies non-interactive/headless mode)
+      // --yolo auto-approves all tool calls — without it, headless mode
+      //   defaults to Plan Mode (read-only) and blocks all write operations.
+      // --skip-trust is required in sandbox environments where the workspace
+      //   hasn't been interactively trusted beforehand.
       // GEMINI_API_KEY is read from the environment
-      return `cd '${safePath}' && GEMINI_API_KEY='${apiKey}' gemini --non-interactive -p '${escapedPrompt}'`
+      return `cd '${safePath}' && GEMINI_API_KEY='${apiKey}' gemini --skip-trust --yolo -p '${escapedPrompt}'`
 
     case "codex":
-      // Codex CLI: `exec` subcommand for non-interactive one-shot mode
-      return `cd '${safePath}' && OPENAI_API_KEY='${apiKey}' codex exec '${escapedPrompt}'`
+      // Codex CLI: `exec` subcommand for non-interactive one-shot mode.
+      // --sandbox workspace-write allows the agent to edit/create files.
+      //   Without it, exec defaults to read-only and blocks all writes.
+      return `cd '${safePath}' && OPENAI_API_KEY='${apiKey}' codex exec --sandbox workspace-write '${escapedPrompt}'`
 
     default:
       // TypeScript exhaustiveness check — should never reach here

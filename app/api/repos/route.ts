@@ -14,11 +14,14 @@ import { NextResponse } from "next/server"
 import { headers } from "next/headers"
 import { auth } from "@/lib/auth"
 import { listRepos } from "@/lib/github"
+import { getGitHubAccessToken } from "@/lib/github-token"
 
 export async function GET(): Promise<NextResponse> {
+  const requestHeaders = await headers()
+
   // Retrieve the current session from BetterAuth
   const session = await auth.api.getSession({
-    headers: await headers(),
+    headers: requestHeaders,
   })
 
   // Guard: user must be authenticated and have a GitHub token
@@ -26,13 +29,8 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Fetch the user's connected accounts to get the GitHub access token
-  const accounts = await auth.api.listUserAccounts({
-    headers: await headers(),
-  })
-
-  const githubAccount = accounts?.find((acc: any) => acc.providerId === "github")
-  const token = githubAccount?.accessToken
+  // BetterAuth intentionally strips tokens from account/session data.
+  const token = await getGitHubAccessToken(requestHeaders)
 
   if (!token) {
     return NextResponse.json(

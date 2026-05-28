@@ -62,8 +62,14 @@ export function RepoSelector({ onSelect, selectedRepo }: RepoSelectorProps) {
     const fetchRepos = async () => {
       try {
         const res = await fetch("/api/repos")
-        if (!res.ok) throw new Error("Failed to fetch repositories")
-        const data = (await res.json()) as GitHubRepo[]
+        const data = (await res.json()) as GitHubRepo[] | { error?: string }
+        if (!res.ok) {
+          const message = "error" in data ? data.error : null
+          throw new Error(message ?? "Failed to fetch repositories")
+        }
+        if (!Array.isArray(data)) {
+          throw new Error("Repository response was not a list")
+        }
         setRepos(data)
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Failed to load repos")

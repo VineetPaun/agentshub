@@ -72,11 +72,16 @@ export default function RunPage() {
 
   // Abort controller ref so we can cancel the stream if needed
   const abortRef = useRef<AbortController | null>(null)
+  const loadedConfigRef = useRef(false)
 
   // -------------------------------------------------------------------------
   // Load config from sessionStorage on mount
   // -------------------------------------------------------------------------
   useEffect(() => {
+    // React Strict Mode can run effects twice in dev; avoid clearing apiKey twice.
+    if (loadedConfigRef.current) return
+    loadedConfigRef.current = true
+
     const raw = sessionStorage.getItem(SESSION_KEY)
     if (!raw) {
       setConfigError(true)
@@ -85,13 +90,17 @@ export default function RunPage() {
 
     try {
       const parsed = JSON.parse(raw) as StoredRunConfig
+      if (!parsed.repoFullName || !parsed.agent || !parsed.apiKey) {
+        setConfigError(true)
+        return
+      }
       setConfig(parsed)
     } catch {
       setConfigError(true)
+      return
     }
 
-    // Clear the apiKey from sessionStorage immediately after reading
-    // to minimise the window it sits in storage
+    // Clear the apiKey from sessionStorage immediately after the first read.
     try {
       const parsed = JSON.parse(raw) as StoredRunConfig
       sessionStorage.setItem(
@@ -108,6 +117,11 @@ export default function RunPage() {
   // -------------------------------------------------------------------------
   const startAgent = useCallback(async () => {
     if (!config || !prompt.trim() || isRunning) return
+
+    if (!config.repoFullName || !config.agent || !config.apiKey) {
+      setRunError("Run config is incomplete. Go back to dashboard and start again.")
+      return
+    }
 
     // Reset state for a fresh run
     setEvents([])

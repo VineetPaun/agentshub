@@ -24,6 +24,7 @@
 import { type NextRequest } from "next/server"
 import { headers } from "next/headers"
 import { auth } from "@/lib/auth"
+import { getGitHubAccessToken } from "@/lib/github-token"
 import { createSandbox, cloneRepo, getDiff, commitAndPush } from "@/lib/sandbox"
 import { buildCLICommand } from "@/lib/agents"
 import type { RunRequest, AgentStreamEvent } from "@/types"
@@ -35,18 +36,20 @@ import type { RunRequest, AgentStreamEvent } from "@/types"
  */
 export const maxDuration = 300
 
+const SANDBOX_REPO_PATH = "/home/user/repo"
+
 export async function POST(req: NextRequest): Promise<Response> {
   // -------------------------------------------------------------------------
   // 1. Auth guard
   // -------------------------------------------------------------------------
-  const session = await auth.api.getSession({ headers: await headers() })
+  const requestHeaders = await headers()
+  const session = await auth.api.getSession({ headers: requestHeaders })
 
   if (!session?.session || !session.user) {
     return new Response("Unauthorized", { status: 401 })
   }
 
-  const githubToken = (session.session as Record<string, unknown>)
-    .githubAccessToken as string | undefined
+  const githubToken = await getGitHubAccessToken(requestHeaders)
 
   if (!githubToken) {
     return new Response("GitHub access token missing — please sign out and sign in again", {
@@ -67,7 +70,14 @@ export async function POST(req: NextRequest): Promise<Response> {
   const { repoFullName, prompt, agent, apiKey } = body
 
   if (!repoFullName || !prompt || !agent || !apiKey) {
-    return new Response("Missing required fields: repoFullName, prompt, agent, apiKey", {
+    const missingFields = [
+      !repoFullName ? "repoFullName" : null,
+      !prompt ? "prompt" : null,
+      !agent ? "agent" : null,
+      !apiKey ? "apiKey" : null,
+    ].filter((field): field is string => field !== null)
+
+    return new Response(`Missing required fields: ${missingFields.join(", ")}`, {
       status: 400,
     })
   }
@@ -100,7 +110,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         // 5. Clone repo
         // -------------------------------------------------------------------
         send({ type: "status", text: `📦 Cloning ${repoFullName}...` })
-        await cloneRepo(sandbox, repoFullName, githubToken, "/repo")
+        await cloneRepo(sandbox, repoFullName, githubToken, SANDBOX_REPO_PATH)
 
         // -------------------------------------------------------------------
         // 6. Run agent CLI — stream stdout/stderr live
@@ -111,7 +121,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           agent,
           prompt,
           apiKey,
-          repoPath: "/repo",
+          repoPath: SANDBOX_REPO_PATH,
         })
 
         await sandbox.commands.run(cliCommand, {
@@ -124,7 +134,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         // 7. Collect diff
         // -------------------------------------------------------------------
         send({ type: "status", text: "🔍 Collecting diff..." })
-        const diff = await getDiff(sandbox, "/repo")
+        const diff = await getDiff(sandbox, SANDBOX_REPO_PATH)
 
         if (!diff.trim()) {
           // Agent ran but made no changes — nothing to commit
@@ -144,7 +154,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         send({ type: "status", text: `🚀 Committing and pushing to branch ${branchName}...` })
         await commitAndPush(
           sandbox,
-          "/repo",
+          SANDBOX_REPO_PATH,
           branchName,
           `Agent (${agent}): ${prompt.slice(0, 72)}`,
           githubToken,

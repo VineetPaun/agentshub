@@ -14,20 +14,21 @@ import { type NextRequest, NextResponse } from "next/server"
 import { headers } from "next/headers"
 import { auth } from "@/lib/auth"
 import { openPR } from "@/lib/github"
+import { getGitHubAccessToken } from "@/lib/github-token"
 import type { AgentType } from "@/types"
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // -------------------------------------------------------------------------
   // Auth guard
   // -------------------------------------------------------------------------
-  const session = await auth.api.getSession({ headers: await headers() })
+  const requestHeaders = await headers()
+  const session = await auth.api.getSession({ headers: requestHeaders })
 
   if (!session?.session || !session.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const githubToken = (session.session as Record<string, unknown>)
-    .githubAccessToken as string | undefined
+  const githubToken = await getGitHubAccessToken(requestHeaders)
 
   if (!githubToken) {
     return NextResponse.json(

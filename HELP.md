@@ -49,6 +49,15 @@
 - **How it's handled**: The `auth.ts` config declares `githubAccessToken` as an `additionalField`. In API routes, read it by casting `session.session as Record<string, unknown>` and accessing `.githubAccessToken`.
 - **Production note**: For real persistence, use a BetterAuth database adapter (Prisma / Drizzle / etc.) so sessions survive server restarts.
 
+### 3a. BetterAuth account listing does not include OAuth tokens
+- **Problem**: `auth.api.listUserAccounts()` returns linked-account metadata only. It does **not** include `accessToken`, so `/api/repos` can fail with `"GitHub access token missing from account"` even when the GitHub account is linked.
+- **Fix**: Use `getGitHubAccessToken()` from `lib/github-token.ts` in server routes that need the GitHub OAuth token, then pass that token to Octokit.
+- **TypeScript note**: In `better-auth@1.6.11`, the generated API type can be narrow enough that the token response needs an `unknown` cast before reading `accessToken`.
+
+### 3b. E2B sandbox user cannot write to `/repo`
+- **Problem**: Cloning into `/repo` can fail with `fatal: could not create work tree dir '/repo': Permission denied` because the sandbox process runs as an unprivileged user.
+- **Fix**: Use a writable path under the sandbox user's home directory, currently `/home/user/repo`.
+
 ### 4. E2B template ID required at runtime
 - **Problem**: The app will throw `"E2B_TEMPLATE_ID is not set"` if you try to run an agent without building the Dockerfile first.
 - **Fix**: Follow the README setup guide to `npx e2b template build` and set `E2B_TEMPLATE_ID` in `.env.local`.
@@ -62,3 +71,27 @@
 ### 7. sessionStorage used for apiKey handoff
 - **Pattern**: Dashboard → Run page handoff stores `{ repoFullName, agent, apiKey }` in `sessionStorage`.
 - **Security**: The `apiKey` is cleared from sessionStorage immediately after being read by the Run page. It is sent server-side in the POST body to `/api/agent/run` and never returned to the client.
+
+### 8. CLI agents — headless invocation requires explicit write permissions (CRITICAL)
+- **Problem**: All three CLI agents default to **read-only** when run headless, so they cannot make file changes.
+- **Gemini CLI**: `-p` alone defaults to Plan Mode (read-only). Must add `--yolo` to auto-approve write operations, and `--skip-trust` for untrusted sandbox directories.
+  ```bash
+  # ❌ Wrong — defaults to plan mode, all write tools blocked
+  gemini -p 'prompt'
+  # ✅ Correct
+  gemini --skip-trust --yolo -p 'prompt'
+  ```
+- **Codex CLI**: `codex exec` defaults to `--sandbox read-only`. Must add `--sandbox workspace-write` to allow file edits.
+  ```bash
+  # ❌ Wrong — read-only, cannot create/edit files
+  codex exec 'prompt'
+  # ✅ Correct
+  codex exec --sandbox workspace-write 'prompt'
+  ```
+- **OpenCode**: `opencode run` auto-approves all writes (no extra flag needed). But `--print` does NOT exist — remove it if present.
+  ```bash
+  # ❌ Wrong — --print is not a valid flag
+  opencode run --print 'prompt'
+  # ✅ Correct
+  opencode run 'prompt'
+  ```
