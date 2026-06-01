@@ -8,12 +8,12 @@
  *
  * Flow:
  *  1. Authenticate user via BetterAuth session
- *  2. Boot an E2B sandbox from the pre-built template
- *  3. Clone the target repo (depth=1)
+ *  2. Boot or reconnect an E2B sandbox from the pre-built template
+ *  3. Clone the target repo once per sandbox (depth=1)
  *  4. Build & run the selected CLI agent command, streaming stdout/stderr live
  *  5. Collect `git diff HEAD`
  *  6. If there are changes: commit → push to a new branch → send `done` event
- *  7. Always kill the sandbox in `finally`
+ *  7. Keep the sandbox alive until the client explicitly destroys it
  *
  * Security:
  *  - GitHub access token & agent API key are NEVER sent to the client
@@ -25,9 +25,22 @@ import { type NextRequest } from "next/server"
 import { headers } from "next/headers"
 import { auth } from "@/lib/auth"
 import { getGitHubAccessToken } from "@/lib/github-token"
-import { createSandbox, cloneRepo, getDiff, commitAndPush } from "@/lib/sandbox"
+import { createSandbox, connectSandbox, ensureRepoCloned, getDiff, commitAndPush } from "@/lib/sandbox"
 import { buildCLICommand } from "@/lib/agents"
-import type { RunRequest, AgentStreamEvent } from "@/types"
+import { decryptSecret } from "@/lib/crypto"
+import {
+  addMessage,
+  appendRunEvents,
+  completeRun,
+  createRun,
+  getConvexTroubleshootingHint,
+  getOrCreateChat,
+  getProviderSecret,
+  isConvexConfigured,
+  upsertProject,
+  upsertUser,
+} from "@/lib/convex-server"
+import type { RunRequest, AgentStreamEvent, RunContinuationContext } from "@/types"
 
 /**
  * Vercel edge / serverless max duration (seconds).
@@ -37,6 +50,47 @@ import type { RunRequest, AgentStreamEvent } from "@/types"
 export const maxDuration = 300
 
 const SANDBOX_REPO_PATH = "/home/user/repo"
+const CLI_QUIET_HEARTBEAT_MS = 15_000
+
+/** Converts unknown thrown values into non-empty messages safe for UI display. */
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message.trim()) return err.message
+  if (typeof err === "string" && err.trim()) return err
+  return fallback
+}
+
+/** Explains why Convex persistence failed while keeping the run fallback intact. */
+function getRunHistoryWarning(err: unknown): string {
+  const message = getErrorMessage(err, "Failed to initialize run history")
+  return `Run history is unavailable, continuing without persistence: ${message}. ${getConvexTroubleshootingHint()}`
+}
+
+/** Builds a short diff summary for run history screens. */
+function summarizeDiff(diff: string): string {
+  const lines = diff.split("\n")
+  const additions = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length
+  const deletions = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length
+  return `${additions} additions, ${deletions} deletions`
+}
+
+/** Prepends prior run context so follow-up prompts work in one-shot CLI agents. */
+function buildPromptWithContinuation(
+  prompt: string,
+  continuation?: RunContinuationContext
+): string {
+  if (!continuation) return prompt
+
+  const contextLines = [
+    "You are continuing an earlier AgentsHub run in the same repository.",
+    `Previous user prompt: ${continuation.previousPrompt}`,
+    continuation.previousBranch ? `Previous branch: ${continuation.previousBranch}` : "",
+    continuation.sandboxId ? `Continuing in sandbox: ${continuation.sandboxId}` : "",
+    continuation.previousDiffSummary ? `Previous changes: ${continuation.previousDiffSummary}` : "",
+    continuation.recentOutput ? `Recent agent output:\n${continuation.recentOutput}` : "",
+  ].filter(Boolean)
+
+  return `${contextLines.join("\n")}\n\nFollow-up user request:\n${prompt}`
+}
 
 export async function POST(req: NextRequest): Promise<Response> {
   // -------------------------------------------------------------------------
@@ -67,20 +121,90 @@ export async function POST(req: NextRequest): Promise<Response> {
     return new Response("Invalid JSON body", { status: 400 })
   }
 
-  const { repoFullName, prompt, agent, apiKey } = body
+  const { repoFullName, projectId: bodyProjectId, prompt, agent, apiKey, continuation } = body
 
-  if (!repoFullName || !prompt || !agent || !apiKey) {
+  if (!repoFullName || !prompt || !agent) {
     const missingFields = [
       !repoFullName ? "repoFullName" : null,
       !prompt ? "prompt" : null,
       !agent ? "agent" : null,
-      !apiKey ? "apiKey" : null,
     ].filter((field): field is string => field !== null)
 
     return new Response(`Missing required fields: ${missingFields.join(", ")}`, {
       status: 400,
     })
   }
+
+  let resolvedApiKey = apiKey?.trim()
+  const agentPrompt = buildPromptWithContinuation(prompt, continuation)
+  let userId: string
+  let projectId: string
+  let chatId: string
+  let runId: string
+  let shouldPersistRun = false
+  let convexInitWarning: string | null = null
+
+  if (isConvexConfigured()) {
+    try {
+      userId = await upsertUser(session.user)
+      projectId = bodyProjectId?.startsWith("local:")
+        ? await upsertProject(userId, { repoFullName })
+        : bodyProjectId ?? await upsertProject(userId, { repoFullName })
+      chatId = await getOrCreateChat(userId, projectId, agent, repoFullName)
+
+      if (!resolvedApiKey) {
+        const savedSecret = await getProviderSecret(userId, agent)
+        if (savedSecret?.encryptedKey) {
+          resolvedApiKey = decryptSecret(savedSecret.encryptedKey)
+        }
+      }
+
+      if (!resolvedApiKey) {
+        return new Response("Provider API key missing. Save an encrypted key from the dashboard.", {
+          status: 400,
+        })
+      }
+
+      runId = await createRun({ userId, projectId, chatId, agent, prompt })
+      await addMessage(chatId, "user", prompt, runId)
+      if (continuation) {
+        await addMessage(
+          chatId,
+          "system",
+          `Continuing from run ${continuation.previousRunId ?? "unknown"}${continuation.previousBranch ? ` on branch ${continuation.previousBranch}` : ""}.`,
+          runId
+        )
+      }
+      shouldPersistRun = true
+    } catch (err: unknown) {
+      const message = getErrorMessage(err, "Failed to initialize run history")
+
+      if (!resolvedApiKey) {
+        return new Response(message, { status: 500 })
+      }
+
+      // A one-time API key is enough to run the agent even if history storage is down.
+      userId = "local"
+      projectId = bodyProjectId ?? `local:${repoFullName}`
+      chatId = "local"
+      runId = `local:${Date.now()}`
+      shouldPersistRun = false
+      convexInitWarning = getRunHistoryWarning(err)
+    }
+  } else {
+    if (!resolvedApiKey) {
+      return new Response("Convex is not configured, so a one-time provider API key is required.", {
+        status: 400,
+      })
+    }
+
+    userId = "local"
+    projectId = bodyProjectId ?? `local:${repoFullName}`
+    chatId = "local"
+    runId = `local:${Date.now()}`
+  }
+
+  const agentApiKey = resolvedApiKey
 
   // -------------------------------------------------------------------------
   // 3. Build SSE ReadableStream
@@ -94,23 +218,47 @@ export async function POST(req: NextRequest): Promise<Response> {
        * Format: `data: <json>\n\n`
        */
       const send = (event: AgentStreamEvent): void => {
+        pendingEvents.push({ ...event, sequence: ++eventSequence })
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
       }
 
       let sandbox: Awaited<ReturnType<typeof createSandbox>> | null = null
-
+      let pendingEvents: Array<AgentStreamEvent & { sequence: number }> = []
+      let eventSequence = 0
       try {
-        // -------------------------------------------------------------------
-        // 4. Boot sandbox
-        // -------------------------------------------------------------------
-        send({ type: "status", text: "⚡ Booting sandbox..." })
-        sandbox = await createSandbox()
+        send({ type: "run", text: runId })
+
+        // Only show persistence fallback during continuations, where missing
+        // previous context materially changes the run UX.
+        if (convexInitWarning && continuation) {
+          send({ type: "warning", text: convexInitWarning })
+        }
 
         // -------------------------------------------------------------------
-        // 5. Clone repo
+        // 4. Boot or reconnect sandbox
         // -------------------------------------------------------------------
-        send({ type: "status", text: `📦 Cloning ${repoFullName}...` })
-        await cloneRepo(sandbox, repoFullName, githubToken, SANDBOX_REPO_PATH)
+        if (continuation?.sandboxId) {
+          send({ type: "status", text: `Reconnecting sandbox ${continuation.sandboxId}...` })
+          sandbox = await connectSandbox(continuation.sandboxId)
+        } else {
+          send({ type: "status", text: "Booting sandbox..." })
+          sandbox = await createSandbox()
+        }
+        send({ type: "sandbox", text: sandbox.sandboxId })
+
+        // -------------------------------------------------------------------
+        // 5. Clone repo once per sandbox
+        // -------------------------------------------------------------------
+        send({ type: "status", text: `Preparing ${repoFullName}...` })
+        const repoState = await ensureRepoCloned(
+          sandbox,
+          repoFullName,
+          githubToken,
+          SANDBOX_REPO_PATH
+        )
+        if (repoState === "reused") {
+          send({ type: "status", text: "Reusing existing sandbox workspace." })
+        }
 
         // -------------------------------------------------------------------
         // 6. Run agent CLI — stream stdout/stderr live
@@ -119,16 +267,41 @@ export async function POST(req: NextRequest): Promise<Response> {
 
         const cliCommand = buildCLICommand({
           agent,
-          prompt,
-          apiKey,
+          prompt: agentPrompt,
+          apiKey: agentApiKey,
           repoPath: SANDBOX_REPO_PATH,
         })
 
-        await sandbox.commands.run(cliCommand, {
-          onStdout: (line: string) => send({ type: "stdout", text: line }),
-          onStderr: (line: string) => send({ type: "stderr", text: line }),
-          timeoutMs: 240_000, // 4 min max for the agent — sandbox still killed in finally
-        })
+        let lastCliOutputAt = Date.now()
+        const heartbeat = setInterval(() => {
+          const quietForMs = Date.now() - lastCliOutputAt
+          if (quietForMs < CLI_QUIET_HEARTBEAT_MS) return
+
+          send({
+            type: "status",
+            text: `${agent} is still working inside the sandbox...`,
+          })
+          lastCliOutputAt = Date.now()
+        }, CLI_QUIET_HEARTBEAT_MS)
+
+        try {
+          await sandbox.commands.run(cliCommand, {
+            onStdout: (line: string) => {
+              lastCliOutputAt = Date.now()
+              send({ type: "stdout", text: line })
+            },
+            onStderr: (line: string) => {
+              lastCliOutputAt = Date.now()
+              send({
+                type: "stderr",
+                text: line,
+              })
+            },
+            timeoutMs: 0, // Disable E2B command deadline for long agent runs.
+          })
+        } finally {
+          clearInterval(heartbeat)
+        }
 
         // -------------------------------------------------------------------
         // 7. Collect diff
@@ -140,6 +313,15 @@ export async function POST(req: NextRequest): Promise<Response> {
           // Agent ran but made no changes — nothing to commit
           send({ type: "status", text: "ℹ️ The agent made no file changes." })
           send({ type: "done", text: "" })
+          if (shouldPersistRun) {
+            await completeRun({
+              runId,
+              status: "completed",
+              sandboxId: sandbox.sandboxId,
+              diff: "",
+              diffSummary: "0 additions, 0 deletions",
+            })
+          }
           return
         }
 
@@ -163,18 +345,31 @@ export async function POST(req: NextRequest): Promise<Response> {
 
         // Pass the branch name to the client so it can open a PR
         send({ type: "done", text: branchName })
+        if (shouldPersistRun) {
+          await completeRun({
+            runId,
+            status: "completed",
+            branch: branchName,
+            sandboxId: sandbox.sandboxId,
+            diff,
+            diffSummary: summarizeDiff(diff),
+          })
+        }
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Unknown error occurred"
+        const message = getErrorMessage(err, "Unknown error occurred")
         send({ type: "error", text: message })
+        if (shouldPersistRun) {
+          await completeRun({ runId, status: "failed", sandboxId: sandbox?.sandboxId, error: message })
+        }
       } finally {
-        // Always kill the sandbox to avoid runaway billing
-        if (sandbox) {
+        if (shouldPersistRun) {
           try {
-            await sandbox.kill()
+            await appendRunEvents(runId, pendingEvents)
           } catch {
-            // Ignore kill errors — sandbox will auto-expire
+            // Persistence failures should not prevent sandbox cleanup.
           }
         }
+        pendingEvents = []
         controller.close()
       }
     },

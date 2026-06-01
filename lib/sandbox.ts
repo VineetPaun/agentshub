@@ -3,14 +3,15 @@
  *
  * E2B sandbox lifecycle helpers.
  *
- * All functions operate on an E2B `Sandbox` instance.
- * The sandbox is created once per agent run and killed in the `finally` block
- * of the streaming route — even if an error occurs.
+ * All functions operate on an E2B `Sandbox` instance. Sandboxes can be
+ * reconnected by ID so follow-up agent prompts can reuse the same filesystem.
  *
  * Reference: https://e2b.dev/docs
  */
 
 import { CommandExitError, Sandbox } from "@e2b/code-interpreter"
+
+const DEFAULT_SANDBOX_TIMEOUT_MS = 60 * 60 * 1000
 
 /**
  * Wraps a string for safe single-quoted shell usage.
@@ -66,20 +67,51 @@ async function runSandboxCommand(
  * Creates a new E2B sandbox from the pre-built agent template.
  *
  * The template ID is set via E2B_TEMPLATE_ID in .env.local after running:
- *   npx e2b template build --dockerfile ./Dockerfile.sandbox --name agent-sandbox
+ *   bun run sandbox:template:create
  *
  * @throws  If E2B_TEMPLATE_ID is not set or sandbox creation fails
  */
 export async function createSandbox(): Promise<Sandbox> {
-  const templateId = process.env.E2B_TEMPLATE_ID
-  if (!templateId) {
+  const templateId = process.env.E2B_TEMPLATE_ID?.trim()
+  const isPlaceholderTemplate =
+    !templateId ||
+    templateId === "e2b-template-abc123" ||
+    templateId.includes("your-template")
+
+  if (isPlaceholderTemplate) {
     throw new Error(
-      "E2B_TEMPLATE_ID is not set. Build the Dockerfile.sandbox template and add the ID to .env.local"
+      "E2B_TEMPLATE_ID is missing or still a placeholder. Run `bun run sandbox:template:create`, set E2B_TEMPLATE_ID to the template name or ID printed by E2B, then restart the Next.js server."
     )
   }
 
   return await Sandbox.create(templateId, {
     // Pass the E2B API key explicitly (also auto-read from E2B_API_KEY env)
+    apiKey: process.env.E2B_API_KEY,
+    // Keep the workspace alive long enough for the user to choose the next step.
+    timeoutMs: DEFAULT_SANDBOX_TIMEOUT_MS,
+  })
+}
+
+/**
+ * Reconnects to an existing E2B sandbox by ID and refreshes its timeout.
+ *
+ * @param sandboxId E2B sandbox ID previously returned to the client.
+ */
+export async function connectSandbox(sandboxId: string): Promise<Sandbox> {
+  const sandbox = await Sandbox.connect(sandboxId, {
+    apiKey: process.env.E2B_API_KEY,
+  })
+  await sandbox.setTimeout(DEFAULT_SANDBOX_TIMEOUT_MS)
+  return sandbox
+}
+
+/**
+ * Kills an E2B sandbox by ID.
+ *
+ * @param sandboxId E2B sandbox ID to destroy.
+ */
+export async function destroySandbox(sandboxId: string): Promise<void> {
+  await Sandbox.kill(sandboxId, {
     apiKey: process.env.E2B_API_KEY,
   })
 }
@@ -116,6 +148,33 @@ export async function cloneRepo(
   if (result.exitCode !== 0) {
     throw new Error(`git clone failed (exit ${result.exitCode}): ${result.stderr}`)
   }
+}
+
+/**
+ * Clones the repository only when it is not already present in the sandbox.
+ *
+ * @param sandbox       Active E2B sandbox
+ * @param repoFullName  "owner/repo"
+ * @param githubToken   GitHub OAuth access token (server-side only)
+ * @param targetPath    Path inside sandbox (default: /home/user/repo)
+ */
+export async function ensureRepoCloned(
+  sandbox: Sandbox,
+  repoFullName: string,
+  githubToken: string,
+  targetPath: string = "/home/user/repo"
+): Promise<"cloned" | "reused"> {
+  const result = await runSandboxCommand(
+    sandbox,
+    `[ -d ${shellQuote(`${targetPath}/.git`)} ] && echo present || echo missing`
+  )
+
+  if (result.stdout.trim() === "present") {
+    return "reused"
+  }
+
+  await cloneRepo(sandbox, repoFullName, githubToken, targetPath)
+  return "cloned"
 }
 
 /**

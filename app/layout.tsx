@@ -11,6 +11,7 @@
 
 import type { Metadata } from "next"
 import { Inter, JetBrains_Mono } from "next/font/google"
+import { ConvexClientProvider } from "@/components/ConvexClientProvider"
 import "./globals.css"
 
 // ---------------------------------------------------------------------------
@@ -61,7 +62,7 @@ export default function RootLayout({
       className={`dark ${inter.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-[#0d0d0d] text-gray-100">
-        {children}
+        <ConvexClientProvider>{children}</ConvexClientProvider>
       </body>
     </html>
   )

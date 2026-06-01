@@ -11,7 +11,7 @@
 
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState, useSyncExternalStore } from "react"
 import { useRouter } from "next/navigation"
 import Image from "next/image"
 import { LogOut, Play, ChevronRight } from "lucide-react"
@@ -46,25 +46,105 @@ export function DashboardClient({ user }: DashboardClientProps) {
   const [selectedAgent, setSelectedAgent] = useState<AgentType | null>(null)
   const [apiKey, setApiKey] = useState("")
   const [signingOut, setSigningOut] = useState(false)
+  const [savedProviders, setSavedProviders] = useState<AgentType[]>([])
+  const [providerStorageAvailable, setProviderStorageAvailable] = useState(true)
+  const [setupError, setSetupError] = useState<string | null>(null)
+  const [savingRun, setSavingRun] = useState(false)
+  const mounted = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false
+  )
 
   // Validation — all three required to enable the CTA
-  const canRun = Boolean(selectedRepo && selectedAgent && apiKey.trim())
+  const hasSavedKey = selectedAgent ? savedProviders.includes(selectedAgent) : false
+  const canRun = Boolean(selectedRepo && selectedAgent && (apiKey.trim() || hasSavedKey))
+  const runDisabled = mounted ? !canRun || savingRun : false
+
+  /** Load encrypted provider-key availability so returning users can run faster. */
+  useEffect(() => {
+    async function loadSavedProviders() {
+      try {
+        const res = await fetch("/api/provider-keys")
+        if (!res.ok) {
+          setProviderStorageAvailable(false)
+          return
+        }
+        const data = (await res.json()) as {
+          providers?: AgentType[]
+          configured?: boolean
+        }
+        setProviderStorageAvailable(data.configured !== false)
+        setSavedProviders(data.providers ?? [])
+      } catch {
+        // Key status is a convenience; the user can still paste a one-time key.
+        setProviderStorageAvailable(false)
+      }
+    }
+
+    loadSavedProviders()
+  }, [])
 
   /** Persist selection to sessionStorage and navigate to /run */
-  const handleRunAgent = () => {
+  const handleRunAgent = async () => {
     if (!canRun || !selectedRepo || !selectedAgent) return
 
-    sessionStorage.setItem(
-      "agentRun",
-      JSON.stringify({
-        repoFullName: selectedRepo.fullName,
-        agent: selectedAgent,
-        // Note: apiKey is also stored in sessionStorage briefly for the handoff.
-        // It is cleared in app/run/page.tsx after being read.
-        apiKey,
+    setSavingRun(true)
+    setSetupError(null)
+
+    try {
+      let oneTimeApiKey = ""
+
+      if (apiKey.trim()) {
+        if (!providerStorageAvailable) {
+          oneTimeApiKey = apiKey.trim()
+        } else {
+          const keyRes = await fetch("/api/provider-keys", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: selectedAgent, apiKey }),
+          })
+          if (!keyRes.ok) {
+            const data = (await keyRes.json()) as { error?: string }
+            if (keyRes.status !== 503) {
+              throw new Error(data.error ?? "Failed to save provider key")
+            }
+
+            // Convex is not configured yet; keep the run working with a one-time handoff.
+            setProviderStorageAvailable(false)
+            oneTimeApiKey = apiKey.trim()
+          }
+        }
+      }
+
+      const projectRes = await fetch("/api/app/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: selectedRepo, agent: selectedAgent }),
       })
-    )
-    router.push("/run")
+      const projectData = (await projectRes.json()) as {
+        projectId?: string
+        error?: string
+      }
+      if (!projectRes.ok || !projectData.projectId) {
+        throw new Error(projectData.error ?? "Failed to save project")
+      }
+
+      sessionStorage.setItem(
+        "agentRun",
+        JSON.stringify({
+          repoFullName: selectedRepo.fullName,
+          projectId: projectData.projectId,
+          agent: selectedAgent,
+          apiKey: oneTimeApiKey,
+        })
+      )
+      router.push("/run")
+    } catch (err: unknown) {
+      setSetupError(err instanceof Error ? err.message : "Failed to prepare run")
+    } finally {
+      setSavingRun(false)
+    }
   }
 
   /** Sign out via BetterAuth and redirect to landing */
@@ -192,6 +272,7 @@ export function DashboardClient({ user }: DashboardClientProps) {
               <AgentSelector
                 selectedAgent={selectedAgent}
                 apiKey={apiKey}
+                hasSavedKey={hasSavedKey}
                 onSelectAgent={(a) => {
                   setSelectedAgent(a)
                   setApiKey("") // reset key when switching agents
@@ -211,7 +292,7 @@ export function DashboardClient({ user }: DashboardClientProps) {
           <Button
             id="run-agent-btn"
             onClick={handleRunAgent}
-            disabled={!canRun}
+            disabled={runDisabled}
             size="lg"
             className={`
               font-semibold px-8 transition-all duration-200
@@ -222,7 +303,7 @@ export function DashboardClient({ user }: DashboardClientProps) {
             `}
           >
             <Play className="mr-2 h-4 w-4" />
-            Run Agent
+            {savingRun ? "Preparing…" : "Run Agent"}
           </Button>
 
           {!canRun && (
@@ -231,8 +312,11 @@ export function DashboardClient({ user }: DashboardClientProps) {
                 ? "← Pick a repository first"
                 : !selectedAgent
                 ? "← Choose an agent"
-                : "← Enter your API key"}
+                : "← Enter your API key or use a saved encrypted key"}
             </p>
+          )}
+          {setupError && (
+            <p className="text-xs text-red-400 font-mono">{setupError}</p>
           )}
         </div>
       </main>

@@ -1,6 +1,6 @@
 # AgentsHub
 
-> Run AI coding agents on your GitHub repos — live-stream output, review the diff, open a PR in one click.
+> Run AI coding agents on your GitHub repos — live-stream output, review the diff, and manually open a PR when you are ready.
 
 ---
 
@@ -12,7 +12,7 @@
 │                                                                │
 │  /               Landing + GitHub OAuth CTA                    │
 │  /dashboard      Repo picker + Agent selector                  │
-│  /run            Prompt input + Live SSE terminal + PR button  │
+│  /run            Agent/IDE workspace + bottom CLI + manual PR   │
 └────────────────────────┬───────────────────────────────────────┘
                          │ HTTPS / SSE
 ┌────────────────────────▼───────────────────────────────────────┐
@@ -44,6 +44,7 @@
 | Language | TypeScript (strict) |
 | Styling | Tailwind CSS v4 + shadcn/ui |
 | Auth | BetterAuth (GitHub OAuth) |
+| Database | Convex |
 | GitHub API | Octokit `@octokit/rest` |
 | Sandbox | E2B `@e2b/code-interpreter` |
 | Streaming | Native `ReadableStream` + SSE |
@@ -76,6 +77,9 @@ Fill in `.env.local`:
 | `BETTER_AUTH_SECRET` | `openssl rand -base64 32` |
 | `E2B_API_KEY` | [e2b.dev/dashboard](https://e2b.dev/dashboard) |
 | `E2B_TEMPLATE_ID` | After step 3 below |
+| `NEXT_PUBLIC_CONVEX_URL` | `bunx convex dev` after linking a Convex project |
+| `CONVEX_SERVER_SECRET` | `openssl rand -base64 32`; also set in Convex env vars |
+| `APP_ENCRYPTION_KEY` | `openssl rand -base64 32` for provider-key encryption |
 
 **GitHub OAuth App settings:**
 - Homepage URL: `http://localhost:3000`
@@ -87,19 +91,16 @@ The agents (OpenCode, Gemini CLI, Codex CLI) run inside a Docker container manag
 Build and push the image once:
 
 ```bash
-# Install E2B CLI
-npm install -g @e2b/cli
-
 # Log in
-npx e2b auth login
+npx -y @e2b/cli@latest auth login
 
-# Build the template (from project root, takes ~3-5 min)
-npx e2b template build --dockerfile ./Dockerfile.sandbox --name agent-sandbox
+# Create the template from Dockerfile.sandbox (from project root, takes ~3-5 min)
+bun run sandbox:template:create
 
-# E2B prints something like:
-#   ✓ Template built: e2b-template-abc123
+# E2B prints SDK examples such as:
+#   Sandbox.create("agent-sandbox")
 # Add to .env.local:
-#   E2B_TEMPLATE_ID=e2b-template-abc123
+#   E2B_TEMPLATE_ID=agent-sandbox
 ```
 
 ### 4. Run locally
@@ -118,9 +119,9 @@ When a new CLI version ships, rebuild the template:
 
 ```bash
 # Pull latest changes to Dockerfile.sandbox, then:
-npx e2b template build --dockerfile ./Dockerfile.sandbox --name agent-sandbox
+bun run sandbox:template:create
 
-# Update E2B_TEMPLATE_ID in .env.local with the new template ID
+# Update E2B_TEMPLATE_ID in .env.local with the template name or ID E2B printed
 ```
 
 The template ID is **not** a secret — it's safe to commit once set.
@@ -134,8 +135,10 @@ The template ID is **not** a secret — it's safe to commit once set.
 | **Vercel timeout** | Free tier serverless functions time out at 60s. Agent runs can take 2-4 min. You need Vercel **Pro** (300s) or host elsewhere. |
 | **Large repos** | We clone with `--depth=1` to minimise clone time. Agents that need full git history may behave differently. |
 | **No session persistence** | BetterAuth uses in-memory storage by default. Swap to a database adapter for production. |
+| **Convex deployment required** | App data, chats, runs, and encrypted provider keys require `NEXT_PUBLIC_CONVEX_URL` and matching `CONVEX_SERVER_SECRET`. Run `bunx convex dev` to generate official Convex bindings after linking. |
 | **Single concurrent run** | Each run spins up a dedicated E2B sandbox. There's no queue — users can run multiple tabs simultaneously (each bills independently). |
 | **OpenCode binary name** | Verify the binary name against [github.com/sst/opencode/releases](https://github.com/sst/opencode/releases) before rebuilding the Dockerfile. |
+| **External CLI warnings** | Some warnings come from third-party CLIs (Gemini/Codex/OpenCode) and are non-fatal. AgentsHub suppresses known noisy headless-mode lines so they do not distract from real run output. |
 
 ---
 
@@ -151,6 +154,9 @@ The template ID is **not** a secret — it's safe to commit once set.
 │   └── api/
 │       ├── auth/[...betterauth]/     BetterAuth GitHub OAuth handlers
 │       ├── repos/route.ts            GET: list repos
+│       ├── repos/[owner]/[repo]/tree GET: selected repo file tree
+│       ├── provider-keys/route.ts    GET/POST encrypted provider keys
+│       ├── app/projects/route.ts     POST selected repo metadata to Convex
 │       ├── agent/run/route.ts        POST: SSE streaming agent run
 │       └── pr/create/route.ts        POST: open GitHub PR
 ├── components/
@@ -161,13 +167,18 @@ The template ID is **not** a secret — it's safe to commit once set.
 │   ├── PromptInput.tsx               Prompt textarea with char count
 │   ├── StreamOutput.tsx              Live-scrolling terminal output
 │   ├── DiffViewer.tsx                Syntax-highlighted git diff
-│   └── PRButton.tsx                  GitHub PR creation button
+│   ├── PRButton.tsx                  Manual GitHub PR creation button
+│   ├── RunFileTree.tsx               IDE-style repository tree panel
+│   └── reui/tree.tsx                 Tree primitives from @reui/c-tree-5
 ├── lib/
 │   ├── auth.ts                       BetterAuth server config
 │   ├── auth-client.ts                BetterAuth React client
 │   ├── github.ts                     Octokit helpers
+│   ├── convex-server.ts              Server-side Convex helper calls
+│   ├── crypto.ts                     Provider key encryption helpers
 │   ├── sandbox.ts                    E2B helpers
 │   └── agents.ts                     CLI command builders
+├── convex/                           Convex schema and app-data functions
 ├── types/index.ts                    Shared TypeScript types
 ├── Dockerfile.sandbox                E2B sandbox image
 └── .env.local.example                Environment variable template

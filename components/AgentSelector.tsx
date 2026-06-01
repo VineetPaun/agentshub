@@ -24,6 +24,8 @@ interface AgentSelectorProps {
   selectedAgent: AgentType | null
   /** API key entered for the selected agent */
   apiKey: string
+  /** True when an encrypted key already exists for the selected agent */
+  hasSavedKey?: boolean
   /** Called when user selects a different agent */
   onSelectAgent: (agent: AgentType) => void
   /** Called when the API key changes */
@@ -57,6 +59,7 @@ const AGENT_ICONS: Record<AgentType, string> = {
 export function AgentSelector({
   selectedAgent,
   apiKey,
+  hasSavedKey = false,
   onSelectAgent,
   onApiKeyChange,
 }: AgentSelectorProps) {
@@ -158,7 +161,9 @@ export function AgentSelector({
           </div>
 
           <p className="text-[10px] text-[#4e4e4e] font-mono">
-            Your key is never stored or logged — it's only used during the sandbox run.
+            {hasSavedKey && !apiKey.trim()
+              ? "Saved encrypted key will be used. Enter a new key to replace it."
+              : "Your key is encrypted before storage and never logged."}
           </p>
         </div>
       )}

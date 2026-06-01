@@ -3,6 +3,10 @@
 
 ## Surprises & Gotchas
 
+### 0. Workspace rule references `PLAN.md`, but file may be missing
+- **Problem**: Workspace rules require phase tracking in `PLAN.md`, but this file can be absent in some branches.
+- **Fix**: If missing, proceed with phase tracking in the active planning workflow and record completion/surprises in `HELP.md`.
+
 ### 1. E2B CLI — correct invocation (IMPORTANT)
 - **Problem**: `npx e2b` fails with "could not determine executable to run". The `e2b` npm package is the SDK, not the CLI — it has no binary.
 - **Fix**: Use the full scoped package name: `npx -y @e2b/cli@latest`
@@ -59,8 +63,8 @@
 - **Fix**: Use a writable path under the sandbox user's home directory, currently `/home/user/repo`.
 
 ### 4. E2B template ID required at runtime
-- **Problem**: The app will throw `"E2B_TEMPLATE_ID is not set"` if you try to run an agent without building the Dockerfile first.
-- **Fix**: Follow the README setup guide to `npx e2b template build` and set `E2B_TEMPLATE_ID` in `.env.local`.
+- **Problem**: The app will throw `"E2B_TEMPLATE_ID is not set"` if you try to run an agent without creating the Dockerfile-backed E2B template first.
+- **Fix**: Follow the README setup guide to run `bun run sandbox:template:create` and set `E2B_TEMPLATE_ID` in `.env.local` to the template name or ID shown in E2B's SDK example, such as `agent-sandbox`.
 
 ### 5. BetterAuth warning during `next build`
 - **Expected**: During `next build`, `[Error [BetterAuthError]: You are using the default secret]` is printed. This is non-fatal — it's BetterAuth warning you that `BETTER_AUTH_SECRET` isn't set in the build environment. The app works fine at runtime when `.env.local` is present.
@@ -95,3 +99,27 @@
   # ✅ Correct
   opencode run 'prompt'
   ```
+
+### 9. `pnpm dlx` may fail in sandboxed runs
+- **Problem**: `pnpm dlx ...` can fail with `EPERM` when trying to write to user cache paths outside workspace.
+- **Fix**: Re-run the command with elevated permissions (outside sandbox) when installing shadcn registry components.
+
+### 10. Convex codegen needs a linked deployment
+- **Problem**: `bunx convex codegen` fails with `No CONVEX_DEPLOYMENT set` until the project is linked with `bunx convex dev`.
+- **Current workaround**: This repo includes minimal local fallback files in `convex/_generated/` so Next.js can type-check before linking.
+- **Production fix**: Run `bunx convex dev`, set `NEXT_PUBLIC_CONVEX_URL`, set `CONVEX_SERVER_SECRET` in both `.env.local` and Convex env vars, then allow Convex to regenerate `convex/_generated/`.
+
+### 11. Provider keys are encrypted before Convex storage
+- **Pattern**: Browser sends provider keys only to `/api/provider-keys`; Next.js encrypts them with `APP_ENCRYPTION_KEY`, then stores only ciphertext in Convex.
+- **Important**: Rotating `APP_ENCRYPTION_KEY` invalidates previously stored provider keys unless a migration/decryption window is implemented.
+
+### 12. Runtime warnings can be expected fallback signals
+- **Provider-key warning**: If `/api/provider-keys` says Convex provider-key storage is unavailable, Convex env vars were detected but a Convex mutation/query failed. Check the linked deployment, deployed Convex functions, and that `CONVEX_SERVER_SECRET` matches both `.env.local` and Convex env.
+- **Run-history warning**: `/api/agent/run` can continue with a one-time provider key when Convex run/chat persistence fails. The run will work, but history, messages, and PR metadata may not persist.
+- **User stream UX**: `/api/agent/run` streams raw stdout/stderr so users can see runtime tool/progress logs. Avoid reintroducing broad CLI-output suppression unless the UI exposes a separate raw log view.
+- **Ripgrep warning**: `Dockerfile.sandbox` installs `ripgrep`; if agent output still mentions missing `rg`, the active `E2B_TEMPLATE_ID` likely points to an older template. Recreate the E2B template and update the env var.
+
+### 13. Agent sandboxes are now user-controlled after runs
+- **Problem**: Killing the E2B sandbox in `/api/agent/run` immediately after completion broke follow-up prompts because the next request had to clone a fresh workspace.
+- **Fix**: `/api/agent/run` emits a `sandbox` SSE event with the E2B sandbox ID and keeps it alive. Continuations reconnect with `Sandbox.connect(sandboxId)`, and `/api/sandbox/destroy` kills the sandbox only when the user chooses a destroy option.
+- **UX note**: The run page intentionally offers three post-run choices: create PR and destroy sandbox, create PR and continue conversation, or destroy sandbox without creating a PR.

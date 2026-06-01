@@ -2,13 +2,12 @@
 #
 # E2B sandbox image pre-baked with all three AI coding CLI agents.
 #
-# Build & push to E2B (run from project root):
-#   npm install -g @e2b/cli
-#   npx e2b auth login
-#   npx e2b template build --dockerfile ./Dockerfile.sandbox --name agent-sandbox
+# Create the E2B template (run from project root):
+#   npx -y @e2b/cli@latest auth login
+#   bun run sandbox:template:create
 #
-# After building, E2B prints a template ID (e.g. e2b-template-abc123).
-# Add it to .env.local as:  E2B_TEMPLATE_ID=e2b-template-abc123
+# After building, E2B prints SDK examples with the template name or ID.
+# Add it to .env.local as:  E2B_TEMPLATE_ID=agent-sandbox
 #
 # Rebuild whenever a new CLI version ships.
 

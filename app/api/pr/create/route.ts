@@ -15,6 +15,7 @@ import { headers } from "next/headers"
 import { auth } from "@/lib/auth"
 import { openPR } from "@/lib/github"
 import { getGitHubAccessToken } from "@/lib/github-token"
+import { createPullRequestRecord } from "@/lib/convex-server"
 import type { AgentType } from "@/types"
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -40,14 +41,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // -------------------------------------------------------------------------
   // Parse body
   // -------------------------------------------------------------------------
-  let body: { repoFullName: string; branch: string; prompt: string; agent: AgentType }
+  let body: {
+    repoFullName: string
+    projectId?: string
+    runId?: string
+    branch: string
+    prompt: string
+    agent: AgentType
+  }
   try {
     body = await req.json()
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { repoFullName, branch, prompt, agent } = body
+  const { repoFullName, projectId, runId, branch, prompt, agent } = body
 
   if (!repoFullName || !branch || !prompt || !agent) {
     return NextResponse.json(
@@ -76,6 +84,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         `> ${prompt}`,
       ].join("\n")
     )
+
+    if (projectId && runId) {
+      try {
+        await createPullRequestRecord({
+          runId,
+          projectId,
+          branch,
+          url: prUrl,
+          state: "open",
+        })
+      } catch {
+        // The PR already exists on GitHub; do not hide its URL due to metadata persistence.
+      }
+    }
 
     return NextResponse.json({ url: prUrl })
   } catch (err: unknown) {

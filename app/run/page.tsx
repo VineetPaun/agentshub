@@ -3,14 +3,14 @@
  *
  * Agent Run page.
  *
- * Layout (desktop): two-column
- *  Left panel  — Prompt input + "Start Agent" button + run metadata
- *  Right panel — StreamOutput (live terminal) → DiffViewer → PRButton
+ * Layout (desktop):
+ *  - Top bar: navigation + Agent/IDE mode toggle
+ *  - Agent Mode: prompt/chat, review, PR actions, and live CLI output
+ *  - IDE Mode: full-width repository file tree only
  *
  * State management:
- *  - Reads { repoFullName, agent, apiKey } from sessionStorage on mount
+ *  - Reads { repoFullName, projectId, agent } from sessionStorage on mount
  *    (saved by DashboardClient before navigating here)
- *  - After reading, immediately clears the apiKey from sessionStorage
  *  - Manages SSE event list, isRunning flag, diff string, branch name
  *
  * SSE consumer:
@@ -21,17 +21,29 @@
 
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
-import { ArrowLeft, Play, StopCircle, Terminal } from "lucide-react"
+import {
+  ArrowLeft,
+  Bot,
+  Columns2,
+  GitBranch,
+  GitPullRequest,
+  Loader2,
+  MessageSquare,
+  Play,
+  StopCircle,
+  Terminal,
+  Trash2,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { PromptInput } from "@/components/PromptInput"
 import { StreamOutput } from "@/components/StreamOutput"
 import { DiffViewer } from "@/components/DiffViewer"
-import { PRButton } from "@/components/PRButton"
+import { RunFileTree } from "@/components/RunFileTree"
 import { AGENT_LABELS } from "@/lib/agents"
-import type { AgentStreamEvent, AgentType } from "@/types"
+import type { AgentStreamEvent, AgentType, RunContinuationContext } from "@/types"
 
 // ---------------------------------------------------------------------------
 // Session storage key
@@ -45,8 +57,75 @@ const SESSION_KEY = "agentRun"
 
 interface StoredRunConfig {
   repoFullName: string
+  projectId: string
   agent: AgentType
-  apiKey: string
+  apiKey?: string
+}
+
+type WorkspaceMode = "agent" | "ide"
+
+interface InitialConfigState {
+  config: StoredRunConfig | null
+  hasError: boolean
+}
+
+interface CompletedRunContext extends RunContinuationContext {
+  prompt: string
+  diff: string
+}
+
+type PostRunAction = "pr-destroy" | "pr-continue" | "destroy"
+
+/** Builds a compact summary for UI labels and follow-up context. */
+function summarizeDiff(diff: string): string {
+  const lines = diff.split("\n")
+  const additions = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length
+  const deletions = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length
+  return `${additions} additions, ${deletions} deletions`
+}
+
+/** Keeps continuation context useful without sending the entire terminal log back. */
+function summarizeRecentOutput(events: AgentStreamEvent[]): string {
+  return events
+    .filter((event) => event.type === "stdout" || event.type === "stderr" || event.type === "warning")
+    .slice(-12)
+    .map((event) => `[${event.type}] ${event.text}`)
+    .join("\n")
+    .slice(0, 4000)
+}
+
+/**
+ * Reads run config from sessionStorage once at mount and clears the stored key.
+ */
+function readInitialConfig(): InitialConfigState {
+  if (typeof window === "undefined") {
+    return { config: null, hasError: false }
+  }
+
+  const raw = window.sessionStorage.getItem(SESSION_KEY)
+  if (!raw) {
+    return { config: null, hasError: true }
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as StoredRunConfig
+    if (!parsed.repoFullName || !parsed.projectId || !parsed.agent) {
+      return { config: null, hasError: true }
+    }
+
+    if (parsed.apiKey) {
+      // Keep one-time keys only in component memory after the dashboard handoff.
+      window.sessionStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ ...parsed, apiKey: "" })
+      )
+    }
+
+    return { config: parsed, hasError: false }
+  } catch {
+    window.sessionStorage.removeItem(SESSION_KEY)
+    return { config: null, hasError: true }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -57,8 +136,8 @@ export default function RunPage() {
   const router = useRouter()
 
   // Run configuration (loaded from sessionStorage)
-  const [config, setConfig] = useState<StoredRunConfig | null>(null)
-  const [configError, setConfigError] = useState(false)
+  const [{ config, hasError: configError }, setInitialConfig] =
+    useState<InitialConfigState>({ config: null, hasError: false })
 
   // Prompt
   const [prompt, setPrompt] = useState("")
@@ -68,47 +147,32 @@ export default function RunPage() {
   const [isRunning, setIsRunning] = useState(false)
   const [diff, setDiff] = useState("")
   const [branch, setBranch] = useState("")
+  const [sandboxId, setSandboxId] = useState("")
+  const [runId, setRunId] = useState("")
   const [runError, setRunError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [createdPrUrl, setCreatedPrUrl] = useState<string | null>(null)
+  const [pendingAction, setPendingAction] = useState<PostRunAction | null>(null)
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("agent")
+  const [completedRun, setCompletedRun] = useState<CompletedRunContext | null>(null)
+  const [continuationContext, setContinuationContext] =
+    useState<RunContinuationContext | null>(null)
 
   // Abort controller ref so we can cancel the stream if needed
   const abortRef = useRef<AbortController | null>(null)
-  const loadedConfigRef = useRef(false)
 
-  // -------------------------------------------------------------------------
-  // Load config from sessionStorage on mount
-  // -------------------------------------------------------------------------
   useEffect(() => {
-    // React Strict Mode can run effects twice in dev; avoid clearing apiKey twice.
-    if (loadedConfigRef.current) return
-    loadedConfigRef.current = true
+    let isMounted = true
 
-    const raw = sessionStorage.getItem(SESSION_KEY)
-    if (!raw) {
-      setConfigError(true)
-      return
-    }
-
-    try {
-      const parsed = JSON.parse(raw) as StoredRunConfig
-      if (!parsed.repoFullName || !parsed.agent || !parsed.apiKey) {
-        setConfigError(true)
-        return
+    // Defer browser storage access until after hydration so SSR and client match.
+    queueMicrotask(() => {
+      if (isMounted) {
+        setInitialConfig(readInitialConfig())
       }
-      setConfig(parsed)
-    } catch {
-      setConfigError(true)
-      return
-    }
+    })
 
-    // Clear the apiKey from sessionStorage immediately after the first read.
-    try {
-      const parsed = JSON.parse(raw) as StoredRunConfig
-      sessionStorage.setItem(
-        SESSION_KEY,
-        JSON.stringify({ ...parsed, apiKey: "" })
-      )
-    } catch {
-      sessionStorage.removeItem(SESSION_KEY)
+    return () => {
+      isMounted = false
     }
   }, [])
 
@@ -118,16 +182,29 @@ export default function RunPage() {
   const startAgent = useCallback(async () => {
     if (!config || !prompt.trim() || isRunning) return
 
-    if (!config.repoFullName || !config.agent || !config.apiKey) {
+    if (!config.repoFullName || !config.projectId || !config.agent) {
       setRunError("Run config is incomplete. Go back to dashboard and start again.")
       return
     }
+
+    const submittedPrompt = prompt.trim()
+    const submittedContinuation = continuationContext
+    const receivedEvents: AgentStreamEvent[] = []
+    let currentDiff = ""
+    let currentRunId = ""
+    let currentSandboxId = continuationContext?.sandboxId ?? ""
 
     // Reset state for a fresh run
     setEvents([])
     setDiff("")
     setBranch("")
+    setSandboxId("")
+    setRunId("")
     setRunError(null)
+    setActionError(null)
+    setCreatedPrUrl(null)
+    setCompletedRun(null)
+    setContinuationContext(null)
     setIsRunning(true)
 
     const controller = new AbortController()
@@ -139,9 +216,11 @@ export default function RunPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           repoFullName: config.repoFullName,
-          prompt: prompt.trim(),
+          projectId: config.projectId,
+          prompt: submittedPrompt,
           agent: config.agent,
           apiKey: config.apiKey,
+          continuation: submittedContinuation ?? undefined,
         }),
         signal: controller.signal,
       })
@@ -178,13 +257,33 @@ export default function RunPage() {
           try {
             const event = JSON.parse(dataLine.slice(6)) as AgentStreamEvent
 
+            receivedEvents.push(event)
             setEvents((prev) => [...prev, event])
 
             if (event.type === "diff") {
+              currentDiff = event.text
               setDiff(event.text)
+            }
+            if (event.type === "run") {
+              currentRunId = event.text
+              setRunId(event.text)
+            }
+            if (event.type === "sandbox") {
+              currentSandboxId = event.text
+              setSandboxId(event.text)
             }
             if (event.type === "done") {
               setBranch(event.text)
+              setCompletedRun({
+                sandboxId: currentSandboxId,
+                prompt: submittedPrompt,
+                previousPrompt: submittedPrompt,
+                previousRunId: currentRunId,
+                previousBranch: event.text,
+                previousDiffSummary: summarizeDiff(currentDiff),
+                recentOutput: summarizeRecentOutput(receivedEvents),
+                diff: currentDiff,
+              })
               setIsRunning(false)
             }
             if (event.type === "error") {
@@ -201,7 +300,7 @@ export default function RunPage() {
       setRunError(err instanceof Error ? err.message : "Unexpected error")
       setIsRunning(false)
     }
-  }, [config, prompt, isRunning])
+  }, [config, continuationContext, prompt, isRunning])
 
   /** Cancel the running stream */
   const stopAgent = () => {
@@ -211,6 +310,106 @@ export default function RunPage() {
       ...prev,
       { type: "status", text: "Run cancelled by user." },
     ])
+  }
+
+  /** Arms the bottom composer so the next prompt continues from the completed run. */
+  const continueConversation = () => {
+    if (!completedRun) return
+
+    setContinuationContext({
+      sandboxId: completedRun.sandboxId,
+      previousPrompt: completedRun.previousPrompt,
+      previousRunId: completedRun.previousRunId,
+      previousBranch: completedRun.previousBranch,
+      previousDiffSummary: completedRun.previousDiffSummary,
+      recentOutput: completedRun.recentOutput,
+    })
+    setPrompt("")
+    window.setTimeout(() => {
+      document.getElementById("prompt-textarea")?.focus()
+    }, 0)
+  }
+
+  /** Opens a PR for the pushed branch and returns the GitHub URL. */
+  const createPullRequest = async (): Promise<string> => {
+    if (createdPrUrl) return createdPrUrl
+
+    if (!config || !completedRun || !branch) {
+      throw new Error("No pushed agent branch is available for PR creation.")
+    }
+
+    const res = await fetch("/api/pr/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoFullName: config.repoFullName,
+        projectId: config.projectId,
+        runId,
+        branch,
+        prompt: completedRun.prompt,
+        agent: config.agent,
+      }),
+    })
+
+    const data = (await res.json()) as { url?: string; error?: string }
+    if (!res.ok || !data.url) {
+      throw new Error(data.error ?? "Failed to create PR")
+    }
+
+    window.open(data.url, "_blank", "noopener,noreferrer")
+    setCreatedPrUrl(data.url)
+    return data.url
+  }
+
+  /** Destroys the active E2B sandbox and clears continuation state. */
+  const destroyActiveSandbox = async (): Promise<void> => {
+    const id = completedRun?.sandboxId ?? sandboxId
+    if (!id) throw new Error("No active sandbox ID is available to destroy.")
+
+    const res = await fetch("/api/sandbox/destroy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sandboxId: id }),
+    })
+
+    const data = (await res.json()) as { ok?: boolean; error?: string }
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error ?? "Failed to destroy sandbox")
+    }
+
+    setSandboxId("")
+    setContinuationContext(null)
+    setEvents((prev) => [...prev, { type: "status", text: `Sandbox ${id} destroyed.` }])
+  }
+
+  /** Runs the selected post-run lifecycle option. */
+  const handlePostRunAction = async (action: PostRunAction) => {
+    if (pendingAction) return
+
+    setPendingAction(action)
+    setActionError(null)
+
+    try {
+      if (action === "pr-destroy") {
+        await createPullRequest()
+        await destroyActiveSandbox()
+        setCompletedRun(null)
+        return
+      }
+
+      if (action === "pr-continue") {
+        await createPullRequest()
+        continueConversation()
+        return
+      }
+
+      await destroyActiveSandbox()
+      setCompletedRun(null)
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "Action failed")
+    } finally {
+      setPendingAction(null)
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -250,11 +449,11 @@ export default function RunPage() {
   // Main layout
   // -------------------------------------------------------------------------
   return (
-    <div className="flex flex-col min-h-screen">
+    <div data-scroll-region="page" className="flex h-screen flex-col overflow-y-auto">
       {/* ------------------------------------------------------------------ */}
       {/* Nav bar                                                             */}
       {/* ------------------------------------------------------------------ */}
-      <nav className="border-b border-[#1e1e1e] bg-[#0d0d0d] px-4 sm:px-6 py-3 flex items-center gap-4">
+      <nav className="shrink-0 border-b border-[#1e1e1e] bg-[#0d0d0d] px-4 sm:px-6 py-3 flex items-center gap-4">
         <Button
           id="back-to-dashboard-btn"
           variant="ghost"
@@ -278,100 +477,217 @@ export default function RunPage() {
             {AGENT_LABELS[config.agent]}
           </span>
         </div>
+
+        {/* Agent/IDE toggle like cursor-style working modes */}
+        <div className="ml-auto inline-flex rounded-md border border-[#2e2e2e] overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setWorkspaceMode("agent")}
+            className={`px-3 py-1.5 text-xs font-mono inline-flex items-center gap-1.5 transition-colors ${
+              workspaceMode === "agent"
+                ? "bg-[#00ff87] text-black"
+                : "bg-[#111] text-[#7e7e7e] hover:text-gray-300"
+            }`}
+          >
+            <Bot className="h-3.5 w-3.5" />
+            Agent Mode
+          </button>
+          <button
+            type="button"
+            onClick={() => setWorkspaceMode("ide")}
+            className={`px-3 py-1.5 text-xs font-mono inline-flex items-center gap-1.5 transition-colors ${
+              workspaceMode === "ide"
+                ? "bg-[#00ff87] text-black"
+                : "bg-[#111] text-[#7e7e7e] hover:text-gray-300"
+            }`}
+          >
+            <Columns2 className="h-3.5 w-3.5" />
+            IDE Mode
+          </button>
+        </div>
       </nav>
 
       {/* ------------------------------------------------------------------ */}
-      {/* Main: two-column layout                                            */}
+      {/* Workspace modes                                                     */}
       {/* ------------------------------------------------------------------ */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-0 divide-x divide-[#1e1e1e]">
-        {/* ---------------------------------------------------------------- */}
-        {/* Left panel: prompt + controls                                    */}
-        {/* ---------------------------------------------------------------- */}
-        <aside className="p-6 flex flex-col gap-5 border-b lg:border-b-0 border-[#1e1e1e]">
-          <div>
-            <h1 className="text-lg font-bold text-white">Run Agent</h1>
-            <p className="text-xs text-[#6e6e6e] mt-1 font-mono">
-              {config.repoFullName} · {AGENT_LABELS[config.agent]}
-            </p>
-          </div>
-
-          {/* Prompt input */}
-          <PromptInput
-            value={prompt}
-            onChange={setPrompt}
-            onSubmit={startAgent}
-            disabled={isRunning}
-          />
-
-          {/* Run / Stop buttons */}
-          <div className="flex gap-2">
-            {!isRunning ? (
-              <Button
-                id="start-agent-btn"
-                onClick={startAgent}
-                disabled={!prompt.trim() || isRunning}
-                className="flex-1 bg-[#00ff87] hover:bg-[#00e07a] text-black font-semibold glow-green transition-all"
-              >
-                <Play className="mr-2 h-4 w-4" />
-                Start Agent
-              </Button>
-            ) : (
-              <Button
-                id="stop-agent-btn"
-                onClick={stopAgent}
-                variant="outline"
-                className="flex-1 border-red-500/50 text-red-400 hover:bg-red-950/20 font-mono text-sm"
-              >
-                <StopCircle className="mr-2 h-4 w-4" />
-                Stop
-              </Button>
-            )}
-          </div>
-
-          {/* Error display */}
-          {runError && (
-            <div className="p-3 rounded-md border border-red-500/30 bg-red-950/20 animate-fade-in">
-              <p className="text-red-400 text-xs font-mono leading-relaxed">{runError}</p>
+      {workspaceMode === "ide" ? (
+        <main className="h-[calc(100vh-57px)] shrink-0 overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(0,255,135,0.08),transparent_30%),#0b0b0b] p-4 sm:p-6">
+          {/* IDE mode follows the completed agent branch once one exists. */}
+          <RunFileTree repoFullName={config.repoFullName} refName={branch || undefined} />
+        </main>
+      ) : (
+        <main className="flex h-[calc(100vh-57px)] min-h-0 flex-col bg-[#0b0b0b]">
+          {/* Agent output stays first, matching familiar CLI/chat interfaces. */}
+          <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 className="text-lg font-bold text-white">Run Agent</h1>
+                <p className="mt-1 text-xs font-mono text-[#6e6e6e]">
+                  {config.repoFullName} · {AGENT_LABELS[config.agent]}
+                </p>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-[#1e1e1e] bg-[#101010] px-3 py-1.5 text-xs font-mono text-[#6e6e6e]">
+                <Terminal className="h-3.5 w-3.5 text-[#00ff87]" />
+                CLI Output
+              </div>
             </div>
-          )}
 
-          {/* Success branch info */}
-          {branch && !isRunning && (
-            <div className="p-3 rounded-md border border-[#00ff87]/30 bg-[#00ff87]/5 animate-fade-in">
-              <p className="text-[#00ff87] text-xs font-mono">
-                ✓ Changes pushed to <span className="font-bold">{branch}</span>
-              </p>
-            </div>
-          )}
-        </aside>
-
-        {/* ---------------------------------------------------------------- */}
-        {/* Right panel: terminal + diff + PR button                        */}
-        {/* ---------------------------------------------------------------- */}
-        <section className="p-6 flex flex-col gap-4 overflow-auto">
-          {/* Section heading */}
-          <div className="flex items-center gap-2">
-            <Terminal className="h-4 w-4 text-[#00ff87]" />
-            <h2 className="text-sm font-semibold text-gray-300">Live Output</h2>
-          </div>
-
-          {/* Live terminal */}
-          <StreamOutput events={events} isRunning={isRunning} />
-
-          {/* Diff viewer — appears after agent finishes with changes */}
-          {diff && <DiffViewer diff={diff} />}
-
-          {/* PR button — appears after branch is set */}
-          {branch && config && (
-            <PRButton
-              repoFullName={config.repoFullName}
-              branch={branch}
-              prompt={prompt}
-              agent={config.agent}
+            <StreamOutput
+              events={events}
+              isRunning={isRunning}
+              className="h-auto min-h-[260px] flex-1"
             />
-          )}
-        </section>
-      </main>
+
+            {runError && (
+              <div className="shrink-0 rounded-md border border-red-500/30 bg-red-950/20 p-3 animate-fade-in">
+                <p className="text-xs font-mono leading-relaxed text-red-400">{runError}</p>
+              </div>
+            )}
+
+            {completedRun && !isRunning && (
+              <div className="shrink-0 rounded-lg border border-[#1e1e1e] bg-[#0f0f0f] p-4 animate-slide-up">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-gray-300">Changes</h2>
+                    <p className="mt-1 text-xs font-mono text-[#6e6e6e]">
+                      {diff
+                        ? "Agent changes are ready for your next step."
+                        : "Agent finished without file changes; you can continue the conversation."}
+                    </p>
+                  </div>
+                  {branch && (
+                    <span className="inline-flex items-center gap-1.5 rounded border border-[#00ff87]/30 px-2 py-1 text-xs font-mono text-[#00ff87]">
+                      <GitBranch className="h-3.5 w-3.5" />
+                      {branch}
+                    </span>
+                  )}
+                </div>
+
+                {diff ? (
+                  <DiffViewer diff={diff} />
+                ) : (
+                  <div className="rounded-lg border border-[#1e1e1e] bg-[#0b0b0b] p-4">
+                    <p className="text-xs font-mono text-[#4e4e4e]">
+                      No file changes were produced in this run.
+                    </p>
+                  </div>
+                )}
+
+                <div className="mt-4 border-t border-[#1e1e1e] pt-4">
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <Button
+                      type="button"
+                      onClick={() => handlePostRunAction("pr-destroy")}
+                      disabled={!branch || pendingAction !== null}
+                      className="h-auto min-h-11 justify-start bg-[#00ff87] px-3 py-2 text-left font-mono text-sm font-semibold text-black hover:bg-[#00e07a]"
+                    >
+                      {pendingAction === "pr-destroy" ? (
+                        <Loader2 className="mr-2 h-4 w-4 shrink-0 animate-spin" />
+                      ) : (
+                        <GitPullRequest className="mr-2 h-4 w-4 shrink-0" />
+                      )}
+                      PR and destroy sandbox
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => handlePostRunAction("pr-continue")}
+                      disabled={!branch || pendingAction !== null}
+                      className="h-auto min-h-11 justify-start border-[#2e2e2e] bg-[#111] px-3 py-2 text-left font-mono text-sm text-gray-300 hover:bg-[#1a1a1a] hover:text-white"
+                    >
+                      {pendingAction === "pr-continue" ? (
+                        <Loader2 className="mr-2 h-4 w-4 shrink-0 animate-spin" />
+                      ) : (
+                        <MessageSquare className="mr-2 h-4 w-4 shrink-0" />
+                      )}
+                      PR and continue
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => handlePostRunAction("destroy")}
+                      disabled={!completedRun.sandboxId || pendingAction !== null}
+                      className="h-auto min-h-11 justify-start border-red-500/40 bg-[#111] px-3 py-2 text-left font-mono text-sm text-red-300 hover:bg-red-950/20 hover:text-red-200"
+                    >
+                      {pendingAction === "destroy" ? (
+                        <Loader2 className="mr-2 h-4 w-4 shrink-0 animate-spin" />
+                      ) : (
+                        <Trash2 className="mr-2 h-4 w-4 shrink-0" />
+                      )}
+                      Destroy sandbox only
+                    </Button>
+                  </div>
+                  {!branch && (
+                    <p className="mt-2 text-xs font-mono text-[#6e6e6e]">
+                      PR actions are unavailable because this run produced no pushed branch.
+                    </p>
+                  )}
+                  {completedRun.sandboxId && (
+                    <p className="mt-2 text-xs font-mono text-[#4e4e4e]">
+                      Sandbox: <span className="text-[#6e6e6e]">{completedRun.sandboxId}</span>
+                    </p>
+                  )}
+                  {createdPrUrl && (
+                    <a
+                      href={createdPrUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-flex text-xs font-mono text-[#00ff87] hover:underline"
+                    >
+                      {createdPrUrl}
+                    </a>
+                  )}
+                  {actionError && (
+                    <p className="mt-2 text-xs font-mono text-red-400">{actionError}</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Bottom composer keeps chat input in the expected location. */}
+          <footer className="shrink-0 border-t border-[#1e1e1e] bg-[#0d0d0d] p-4 sm:p-5">
+            {continuationContext && (
+              <div className="mb-3 rounded-md border border-[#00ff87]/30 bg-[#00ff87]/5 px-3 py-2">
+                <p className="text-xs font-mono text-[#00ff87]">
+                  Continuing from {continuationContext.previousBranch || "the previous run"}. Add your follow-up request below.
+                </p>
+              </div>
+            )}
+
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px] lg:items-end">
+              <PromptInput
+                value={prompt}
+                onChange={setPrompt}
+                onSubmit={startAgent}
+                disabled={isRunning}
+              />
+
+              {!isRunning ? (
+                <Button
+                  id="start-agent-btn"
+                  onClick={startAgent}
+                  disabled={!prompt.trim() || isRunning}
+                  className="h-11 bg-[#00ff87] font-semibold text-black transition-all hover:bg-[#00e07a] glow-green"
+                >
+                  <Play className="mr-2 h-4 w-4" />
+                  {continuationContext ? "Continue Agent" : "Start Agent"}
+                </Button>
+              ) : (
+                <Button
+                  id="stop-agent-btn"
+                  onClick={stopAgent}
+                  variant="outline"
+                  className="h-11 border-red-500/50 font-mono text-sm text-red-400 hover:bg-red-950/20"
+                >
+                  <StopCircle className="mr-2 h-4 w-4" />
+                  Stop
+                </Button>
+              )}
+            </div>
+          </footer>
+        </main>
+      )}
     </div>
   )
 }

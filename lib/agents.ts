@@ -41,13 +41,15 @@ export function buildCLICommand(opts: CLICommandOptions): string {
   const escapedPrompt = prompt.replace(/'/g, "'\\''")
   // Escape the repoPath in case it contains spaces.
   const safePath = repoPath.replace(/'/g, "'\\''")
+  // Use a consistent color-capable terminal env for headless CLI runs.
+  const terminalEnv = "TERM=xterm-256color COLORTERM=truecolor FORCE_COLOR=1"
 
   switch (agent) {
     case "opencode":
       // OpenCode: `run` subcommand for non-interactive one-shot execution.
       // All tool permissions (file writes, etc.) are auto-approved in run mode.
       // OPENAI_API_KEY is read by OpenCode automatically.
-      return `cd '${safePath}' && OPENAI_API_KEY='${apiKey}' opencode run '${escapedPrompt}'`
+      return `cd '${safePath}' && ${terminalEnv} OPENAI_API_KEY='${apiKey}' opencode run '${escapedPrompt}'`
 
     case "gemini":
       // Gemini CLI: -p for prompt (implies non-interactive/headless mode)
@@ -56,13 +58,13 @@ export function buildCLICommand(opts: CLICommandOptions): string {
       // --skip-trust is required in sandbox environments where the workspace
       //   hasn't been interactively trusted beforehand.
       // GEMINI_API_KEY is read from the environment
-      return `cd '${safePath}' && GEMINI_API_KEY='${apiKey}' gemini --skip-trust --yolo -p '${escapedPrompt}'`
+      return `cd '${safePath}' && ${terminalEnv} GEMINI_API_KEY='${apiKey}' gemini --skip-trust --yolo -p '${escapedPrompt}'`
 
     case "codex":
       // Codex CLI: `exec` subcommand for non-interactive one-shot mode.
       // --sandbox workspace-write allows the agent to edit/create files.
       //   Without it, exec defaults to read-only and blocks all writes.
-      return `cd '${safePath}' && OPENAI_API_KEY='${apiKey}' codex exec --sandbox workspace-write '${escapedPrompt}'`
+      return `cd '${safePath}' && ${terminalEnv} OPENAI_API_KEY='${apiKey}' codex exec --sandbox workspace-write '${escapedPrompt}'`
 
     default:
       // TypeScript exhaustiveness check — should never reach here

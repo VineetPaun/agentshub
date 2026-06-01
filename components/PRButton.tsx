@@ -22,6 +22,10 @@ import type { AgentType } from "@/types"
 interface PRButtonProps {
   /** "owner/repo" */
   repoFullName: string
+  /** Convex project ID for PR metadata persistence */
+  projectId?: string
+  /** Convex run ID for PR metadata persistence */
+  runId?: string
   /** Branch created by the agent, e.g. "agent/gemini-1234567890" */
   branch: string
   /** The original user prompt (included in PR body) */
@@ -34,7 +38,14 @@ interface PRButtonProps {
 // Component
 // ---------------------------------------------------------------------------
 
-export function PRButton({ repoFullName, branch, prompt, agent }: PRButtonProps) {
+export function PRButton({
+  repoFullName,
+  projectId,
+  runId,
+  branch,
+  prompt,
+  agent,
+}: PRButtonProps) {
   const [loading, setLoading] = useState(false)
   const [prUrl, setPrUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -48,7 +59,7 @@ export function PRButton({ repoFullName, branch, prompt, agent }: PRButtonProps)
       const res = await fetch("/api/pr/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repoFullName, branch, prompt, agent }),
+        body: JSON.stringify({ repoFullName, projectId, runId, branch, prompt, agent }),
       })
 
       const data = (await res.json()) as { url?: string; error?: string }
@@ -68,6 +79,11 @@ export function PRButton({ repoFullName, branch, prompt, agent }: PRButtonProps)
 
   return (
     <div className="mt-4 flex flex-col gap-2 animate-slide-up">
+      {/* Explicitly communicate that PR creation is user-confirmed */}
+      <p className="text-xs text-[#6e6e6e] font-mono">
+        Branch is already pushed. PR will be created only when you click the button.
+      </p>
+
       {/* Primary action */}
       {!prUrl ? (
         <Button
@@ -84,7 +100,7 @@ export function PRButton({ repoFullName, branch, prompt, agent }: PRButtonProps)
           ) : (
             <>
               <GitPullRequest className="mr-2 h-4 w-4" />
-              Open Pull Request on GitHub
+              Create Pull Request (Manual)
             </>
           )}
         </Button>
